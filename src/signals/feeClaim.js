@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import { PUMP_PROGRAM, PUMP_AMM, DISC_DIST_FEES, SOLANA_WS_URL } from '../config.js';
 import { now, pruneSeen, lamToSol, discMatch, parseDistFees } from '../utils.js';
-import { numSetting, boolSetting } from '../db/settings.js';
+import { activeStrategy, numSetting, boolSetting } from '../db/settings.js';
 import { storeSignalEvent } from './trending.js';
 import { graduated } from './graduated.js';
 import { trending } from './trending.js';
@@ -15,8 +15,10 @@ export function setCandidateHandler(fn) {
 }
 
 export async function handleFeeClaim(fee, signature) {
+  const strat = activeStrategy();
   const sol = lamToSol(fee.distributed);
-  if (sol < numSetting('min_fee_claim_sol', 2)) return;
+  const minFee = strat.min_fee_claim_sol ?? numSetting('min_fee_claim_sol', 2);
+  if (minFee > 0 && sol < minFee) return;
   const graduatedCoin = graduated.get(fee.mint) || null;
   const trendingToken = boolSetting('trending_enabled', true) ? trending.get(fee.mint) || null : null;
   if (!graduatedCoin && !trendingToken) return;

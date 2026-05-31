@@ -1,11 +1,10 @@
 import { now, json } from '../utils.js';
-import { numSetting, boolSetting } from '../db/settings.js';
+import { activeStrategy, numSetting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { WSOL_MINT, LIVE_MIN_SOL_RESERVE_LAMPORTS } from '../config.js';
 import { escapeHtml, fmtSol } from '../format.js';
 import { executeJupiterSwap, liveWalletBalanceLamports, fetchLiveTokenBalance } from '../liveExecutor.js';
-import { activeStrategy } from '../db/settings.js';
-import { createLivePosition, canOpenMorePositions, openPositionCount } from '../db/positions.js';
+import { createLivePosition, canOpenMorePositions, openPositionByMint, openPositionCount } from '../db/positions.js';
 import { intentById } from '../db/intents.js';
 import { logDecisionEvent } from '../db/decisions.js';
 import { refreshCandidateForExecution } from './positions.js';
@@ -15,9 +14,18 @@ import { sendPositionOpen, sendTelegram } from '../telegram/send.js';
 import { updateCandidateStatus } from '../db/candidates.js';
 import { createTradeIntent } from '../db/intents.js';
 
+function duplicateOpenPositionError(existing) {
+  const err = new Error(`open position already exists for this token (#${existing.id})`);
+  err.code = 'OPEN_POSITION_EXISTS';
+  err.positionId = existing.id;
+  return err;
+}
+
 export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
   const strat = activeStrategy();
   const amountLamports = Math.floor((strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1)) * 1_000_000_000);
+  const existingOpenPosition = openPositionByMint(selectedRow.candidate.token.mint);
+  if (existingOpenPosition) throw duplicateOpenPositionError(existingOpenPosition);
   const balance = await liveWalletBalanceLamports();
   if (balance < amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) {
     throw new Error(`Insufficient SOL balance. Need ${fmtSol((amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) / 1_000_000_000)} SOL including reserve.`);
@@ -58,8 +66,10 @@ export async function executeLiveSell(position, reason) {
 export async function executeConfirmedIntent(chatId, intentId) {
   const intent = intentById(intentId);
   if (!intent || intent.status !== 'pending_confirmation') return bot.sendMessage(chatId, 'Pending intent not found.');
+  const strat = activeStrategy();
   if (!canOpenMorePositions()) {
-    return bot.sendMessage(chatId, `Max open positions reached (${openPositionCount()}/${numSetting('max_open_positions', 3)}).`);
+    const max = strat.max_open_positions ?? numSetting('max_open_positions', 3);
+    return bot.sendMessage(chatId, `Max open positions reached (${openPositionCount()}/${max}).`);
   }
   const { decision } = intent.payload;
   try {
@@ -77,8 +87,8 @@ export async function executeConfirmedIntent(chatId, intentId) {
         `Failures: ${escapeHtml((freshRow.candidate.filters?.failures || []).join('; ') || 'fresh execution guard failed')}`,
       ].join('\n'), { parse_mode: 'HTML', disable_web_page_preview: true });
     }
-    const strat = activeStrategy();
-    const amountLamports = Math.floor((strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1)) * 1_000_000_000);
+    const sizeSol = Number(intent.size_sol ?? intent.payload?.strategy?.position_size_sol ?? strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1));
+    const amountLamports = Math.floor(sizeSol * 1_000_000_000);
     const balance = await liveWalletBalanceLamports();
     if (balance < amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) {
       db.prepare('UPDATE trade_intents SET status = ?, updated_at_ms = ? WHERE id = ?').run('rejected_insufficient_balance', now(), intentId);

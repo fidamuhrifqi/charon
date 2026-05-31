@@ -5,6 +5,7 @@ import { fetchJupiterAsset, fetchJupiterHolders, fetchJupiterChartContext } from
 import { fetchSavedWalletExposure } from '../enrichment/wallets.js';
 import { fetchTwitterNarrative } from '../enrichment/twitter.js';
 import { gmgnLink } from '../format.js';
+import { profitCooldownFailureText, profitCooldownStatus } from './profitCooldown.js';
 
 export function buildFeeSnapshot(fee, signature) {
   return {
@@ -27,8 +28,169 @@ export function signalLabel(signals = {}) {
   ].filter(Boolean).join(' + ') || signals.route || 'unknown';
 }
 
-export function filterCandidate(candidate) {
-  const strat = activeStrategy();
+function boolConfig(strat, key, fallback = false) {
+  return strat[key] === undefined || strat[key] === null ? fallback : Boolean(strat[key]);
+}
+
+function numConfig(strat, key, fallback = 0) {
+  const number = Number(strat[key]);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function buySellPressure(candidate) {
+  const gmgnPrice = candidate.gmgn?.price || {};
+  const trending = candidate.trending || {};
+  const sources = [
+    {
+      source: 'gmgn 5m',
+      buys: firstFiniteNumber(gmgnPrice.buys_5m),
+      sells: firstFiniteNumber(gmgnPrice.sells_5m),
+    },
+    {
+      source: 'trending',
+      buys: firstFiniteNumber(trending.buys),
+      sells: firstFiniteNumber(trending.sells),
+    },
+  ];
+
+  for (const item of sources) {
+    if (!Number.isFinite(item.buys) || !Number.isFinite(item.sells)) continue;
+    if (item.buys + item.sells <= 0) continue;
+    return {
+      ...item,
+      ratio: item.buys / Math.max(1, item.sells),
+    };
+  }
+
+  return null;
+}
+
+function applyBbBuyPressureFilter(candidate, strat, indicators, failures) {
+  if (!boolConfig(strat, 'bb_buy_pressure_guard_enabled', false)) return;
+  const bandPosition = firstFiniteNumber(indicators.bollinger?.bandPosition, indicators.bbrsi?.bandPosition);
+  if (!Number.isFinite(bandPosition)) return;
+
+  const minBandPosition = numConfig(strat, 'bb_buy_pressure_min_band_pos', 80);
+  if (minBandPosition <= 0 || bandPosition < minBandPosition) return;
+
+  const pressure = buySellPressure(candidate);
+  if (!pressure) return;
+
+  const minRatio = numConfig(strat, 'bb_buy_pressure_min_ratio', 1.5);
+  if (minRatio > 0 && pressure.ratio <= minRatio) {
+    failures.push(`BB buy pressure: BB ${bandPosition.toFixed(1)}% >= ${minBandPosition}%, buy/sell ${pressure.ratio.toFixed(2)} <= ${minRatio} (${pressure.source})`);
+  }
+}
+
+function applyBuyPressureFilter(candidate, strat, failures) {
+  if (!boolConfig(strat, 'buy_pressure_guard_enabled', false)) return;
+  const minRatio = numConfig(strat, 'buy_pressure_min_ratio', 0);
+  if (minRatio <= 0) return;
+
+  const pressure = buySellPressure(candidate);
+  if (!pressure) return;
+
+  if (pressure.ratio <= minRatio) {
+    failures.push(`buy pressure: buy/sell ${pressure.ratio.toFixed(2)} <= ${minRatio} (${pressure.source})`);
+  }
+}
+
+function applyIndicatorFilters(candidate, strat, failures) {
+  if (!boolConfig(strat, 'chart_indicators_enabled', false)) return;
+  const indicators = candidate.chart?.indicators;
+  if (!indicators?.available) return;
+
+  if (boolConfig(strat, 'chart_indicators_hard_filter', false)) {
+    const supertrend = indicators.supertrend;
+    if (boolConfig(strat, 'supertrend_required', false) && supertrend?.trend === 'bearish') {
+      failures.push('supertrend: bearish');
+    }
+
+    const rsi = Number(indicators.rsi?.value);
+    if (boolConfig(strat, 'rsi_guard_enabled', true) && Number.isFinite(rsi)) {
+      const min = numConfig(strat, 'rsi_min', 45);
+      const max = numConfig(strat, 'rsi_max', 78);
+      if (min > 0 && rsi < min) failures.push(`RSI: ${rsi} < ${min}`);
+      if (max > 0 && rsi > max) failures.push(`RSI: ${rsi} > ${max}`);
+    }
+
+    const bbrsi = indicators.bbrsi;
+    if (boolConfig(strat, 'bbrsi_guard_enabled', true) && bbrsi) {
+      const overboughtRsi = numConfig(strat, 'bbrsi_overbought_rsi', numConfig(strat, 'rsi_max', 78));
+      const maxBandPos = numConfig(strat, 'bbrsi_max_band_pos', 105);
+      if (Number(bbrsi.rsi) >= overboughtRsi && Number(bbrsi.bandPosition) >= maxBandPos) {
+        failures.push(`BBRSI: RSI ${bbrsi.rsi} and band ${bbrsi.bandPosition}% >= ${overboughtRsi}/${maxBandPos}%`);
+      }
+    }
+  }
+
+  applyBbBuyPressureFilter(candidate, strat, indicators, failures);
+}
+
+function sourceFlagsFromCandidate(candidate) {
+  return {
+    hasFee: Boolean(candidate.feeClaim || candidate.signals?.hasFeeClaim),
+    hasGraduated: Boolean(candidate.graduation || candidate.signals?.hasGraduated),
+    hasTrending: Boolean(candidate.trending || candidate.signals?.hasTrending),
+    sourceCount: Number(candidate.signals?.sourceCount || 0),
+  };
+}
+
+export function sourceGateStatus(sources, strat = activeStrategy()) {
+  const sourceCount = Number(sources.sourceCount || 0);
+  const enabled = Boolean(strat.source_gate_enabled);
+  const required = {
+    fee: Boolean(strat.source_require_fee),
+    graduated: Boolean(strat.source_require_graduated),
+    trending: Boolean(strat.source_require_trending),
+  };
+  const primaryPass = !enabled || (
+    (!required.fee || sources.hasFee) &&
+    (!required.graduated || sources.hasGraduated) &&
+    (!required.trending || sources.hasTrending)
+  );
+  const fallbackMin = Math.max(0, Math.floor(Number(strat.min_source_count || 0)));
+  const fallbackPass = enabled && fallbackMin > 0 && sourceCount >= fallbackMin;
+  return {
+    enabled,
+    required,
+    primaryPass,
+    fallbackPass,
+    fallbackMin,
+    sourceCount,
+    passed: primaryPass || fallbackPass,
+    sources: {
+      fee: Boolean(sources.hasFee),
+      graduated: Boolean(sources.hasGraduated),
+      trending: Boolean(sources.hasTrending),
+    },
+  };
+}
+
+export function sourceGateFailureText(status) {
+  const required = Object.entries(status.required)
+    .filter(([, value]) => value)
+    .map(([key]) => key)
+    .join('+') || 'none';
+  const present = Object.entries(status.sources)
+    .filter(([, value]) => value)
+    .map(([key]) => key)
+    .join('+') || 'none';
+  const fallback = status.fallbackMin > 0
+    ? ` or min sources ${status.fallbackMin} fallback (got ${status.sourceCount})`
+    : '';
+  return `source gate: requires ${required}${fallback}; got ${present}`;
+}
+
+export function filterCandidate(candidate, strat = activeStrategy()) {
   const failures = [];
   const mcap = candidate.metrics.marketCapUsd;
   const totalFees = candidate.metrics.gmgnTotalFeesSol;
@@ -41,6 +203,8 @@ export function filterCandidate(candidate) {
   const trendingSwaps = Number(candidate.trending?.swaps ?? 0);
   const rugRatio = Number(candidate.trending?.rug_ratio ?? 0);
   const bundlerRate = Number(candidate.trending?.bundler_rate ?? 0);
+  const sourceGate = sourceGateStatus(sourceFlagsFromCandidate(candidate), strat);
+  if (sourceGate.enabled && !sourceGate.passed) failures.push(sourceGateFailureText(sourceGate));
 
   // Fee claim check
   if (candidate.feeClaim) {
@@ -112,15 +276,21 @@ export function filterCandidate(candidate) {
     }
   }
 
+  applyIndicatorFilters(candidate, strat, failures);
+  applyBuyPressureFilter(candidate, strat, failures);
+
+  const cooldown = profitCooldownStatus(candidate, strat);
+  if (cooldown.active) failures.push(profitCooldownFailureText(cooldown));
+
   return { passed: failures.length === 0, failures, strategy: strat.id };
 }
 
-export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, route }) {
+export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, route, sourceCount = null }) {
   const strat = activeStrategy();
   const gmgn = await fetchGmgnTokenInfo(mint);
   const jupiterAsset = await fetchJupiterAsset(mint);
   const holders = await fetchJupiterHolders(mint);
-  const chart = await fetchJupiterChartContext(mint);
+  const chart = await fetchJupiterChartContext(mint, strat);
   const savedWalletExposure = await fetchSavedWalletExposure(mint, holders);
   const twitterNarrative = await fetchTwitterNarrative(graduatedCoin || jupiterAsset, gmgn);
   const priceUsd = firstPositiveNumber(tokenPriceFromGmgn(gmgn), jupiterAsset?.usdPrice, trendingToken?.price);
@@ -137,6 +307,9 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
     graduatedCoin ? 'graduated' : null,
     trendingToken ? 'trending' : null,
   ].filter(Boolean).join('_');
+  const normalizedSourceCount = Number.isFinite(Number(sourceCount))
+    ? Number(sourceCount)
+    : [fee, graduatedCoin, trendingToken].filter(Boolean).length;
 
   const candidate = {
     token: {
@@ -172,6 +345,7 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
       hasFeeClaim: Boolean(fee),
       hasGraduated: Boolean(graduatedCoin),
       hasTrending: Boolean(trendingToken),
+      sourceCount: normalizedSourceCount,
       triggerSignature: signature,
       strategy: strat.id,
     },
@@ -186,6 +360,6 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
     twitterNarrative,
     createdAtMs: now(),
   };
-  candidate.filters = filterCandidate(candidate);
+  candidate.filters = filterCandidate(candidate, strat);
   return candidate;
 }

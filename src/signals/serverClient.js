@@ -4,6 +4,7 @@ import { now } from '../utils.js';
 import { activeStrategy } from '../db/settings.js';
 import { storeSignalEvent, trendingSignalPass, trending } from './trending.js';
 import { graduated } from './graduated.js';
+import { sourceGateStatus } from '../pipeline/candidateBuilder.js';
 
 let candidateHandler = null;
 let degenHandler = null;
@@ -25,16 +26,25 @@ function signalKey(signal) {
   return `${signal.mint}:${sources}`;
 }
 
-async function triggerCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route }) {
+async function triggerCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route, sourceCount }) {
   if (!candidateHandler) return;
-  await candidateHandler({ mint, fee, signature, graduatedCoin, trendingToken, route });
+  await candidateHandler({ mint, fee, signature, graduatedCoin, trendingToken, route, sourceCount });
 }
 
 export async function fetchServerSignals() {
   try {
+    const strat = activeStrategy();
     const url = new URL('/api/signals', SIGNAL_SERVER_URL);
     url.searchParams.set('limit', '100');
-    url.searchParams.set('minSources', '2');
+    const requiredSourceCount = [
+      strat.source_require_fee,
+      strat.source_require_graduated,
+      strat.source_require_trending,
+    ].filter(Boolean).length;
+    const requestMinSources = strat.source_gate_enabled
+      ? Math.max(1, requiredSourceCount)
+      : Math.max(1, Math.floor(strat.min_source_count ?? 2));
+    url.searchParams.set('minSources', String(requestMinSources));
 
     const res = await axios.get(url.toString(), {
       timeout: 10_000,
@@ -44,7 +54,6 @@ export async function fetchServerSignals() {
 
     prune(seenSignals, 10 * 60_000);
 
-    const strat = activeStrategy();
     let processed = 0;
     let triggered = 0;
     let dipAlerts = 0;
@@ -101,9 +110,17 @@ export async function fetchServerSignals() {
       const trendingToken = trending.get(mint) || null;
       const hasFee = Boolean(signal.feeClaim);
       const sourceCount = signal.sourceCount || 1;
+      const sourceGate = sourceGateStatus({
+        hasFee,
+        hasGraduated: Boolean(graduatedCoin),
+        hasTrending: Boolean(trendingToken),
+        sourceCount,
+      }, strat);
 
       // Strategy gate: check source count
-      if (sourceCount < strat.min_source_count) { processed++; continue; }
+      if (sourceGate.enabled) {
+        if (!sourceGate.passed) { processed++; continue; }
+      } else if (sourceCount < strat.min_source_count) { processed++; continue; }
 
       // Strategy gate: fee claim requirement
       if (strat.require_fee_claim && !hasFee) { processed++; continue; }
@@ -145,7 +162,7 @@ export async function fetchServerSignals() {
         const athDist = signal.graduated?.distanceFromAthPercent;
         if (athDist != null && athDist <= strat.max_ath_distance_pct) {
           // Already at dip target, trigger immediately
-          await triggerCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route });
+          await triggerCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route, sourceCount });
           triggered++;
         } else {
           // Store price alert for later
@@ -164,7 +181,7 @@ export async function fetchServerSignals() {
         }
       } else {
         // Immediate entry mode (sniper, smart_money, degen)
-        await triggerCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route });
+        await triggerCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route, sourceCount });
         triggered++;
       }
 

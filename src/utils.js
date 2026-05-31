@@ -127,6 +127,36 @@ export function parseNumericInput(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+export function parseDurationInput(value, { defaultUnit = 'm', maxMs = 30 * 24 * 60 * 60_000 } = {}) {
+  const raw = String(value || '').trim().toLowerCase().replace(/[\s,_]/g, '');
+  if (raw === 'off' || raw === 'none' || raw === 'disable') return 0;
+  const durationParts = [...raw.matchAll(/(\d+(?:\.\d+)?)(ms|s|m|h|d)/g)];
+  if (durationParts.length && durationParts.map(part => part[0]).join('') === raw) {
+    const multipliers = {
+      ms: 1,
+      s: 1_000,
+      m: 60_000,
+      h: 60 * 60_000,
+      d: 24 * 60 * 60_000,
+    };
+    const parsed = durationParts.reduce((sum, part) => sum + Number(part[1]) * multipliers[part[2]], 0);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.min(Math.round(parsed), maxMs) : 0;
+  }
+  const match = raw.match(/^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/);
+  if (!match) return null;
+  const multipliers = {
+    ms: 1,
+    s: 1_000,
+    m: 60_000,
+    h: 60 * 60_000,
+    d: 24 * 60 * 60_000,
+  };
+  const parsed = Number(match[1]) * multipliers[match[2] || defaultUnit];
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed <= 0) return 0;
+  return Math.min(Math.round(parsed), maxMs);
+}
+
 export function parseWindowMs(value = '12h') {
   const raw = String(value || '12h').trim().toLowerCase();
   const match = raw.match(/^(\d+(?:\.\d+)?)(m|h|d)?$/);
@@ -141,6 +171,33 @@ export function formatWindow(ms) {
   if (ms % (24 * 60 * 60_000) === 0) return `${ms / (24 * 60 * 60_000)}d`;
   if (ms % (60 * 60_000) === 0) return `${ms / (60 * 60_000)}h`;
   return `${Math.round(ms / 60_000)}m`;
+}
+
+export function formatDuration(ms) {
+  const totalMinutes = Math.max(0, Math.round(Number(ms || 0) / 60_000));
+  if (totalMinutes < 1) return '0m';
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (minutes || !parts.length) parts.push(`${minutes}m`);
+  return parts.join(' ');
+}
+
+export function formatWibDate(ms) {
+  const at = Number(ms || 0);
+  if (!Number.isFinite(at) || at <= 0) return 'unknown';
+  return `${new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(at))} WIB`;
 }
 
 export function makeFailureTracker(name, alertFn, threshold = 3) {

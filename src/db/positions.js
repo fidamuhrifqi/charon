@@ -1,9 +1,19 @@
 import { db } from './connection.js';
 import { now, json } from '../utils.js';
-import { numSetting, boolSetting, setting, activeStrategy } from './settings.js';
+import { numSetting, boolSetting, setting, activeStrategy, strategyById } from './settings.js';
 
 export function openPositions() {
   return db.prepare('SELECT * FROM dry_run_positions WHERE status = ? ORDER BY opened_at_ms DESC').all('open');
+}
+
+export function openPositionByMint(mint) {
+  if (!mint) return null;
+  return db.prepare(`
+    SELECT * FROM dry_run_positions
+    WHERE mint = ? AND status = 'open'
+    ORDER BY opened_at_ms DESC, id DESC
+    LIMIT 1
+  `).get(mint);
 }
 
 export function openPositionCount() {
@@ -22,25 +32,36 @@ export function tradingMode() {
   return ['dry_run', 'confirm', 'live'].includes(mode) ? mode : 'dry_run';
 }
 
+function strategyForCandidate(candidate) {
+  const strategyId = candidate?.filters?.strategy || candidate?.signals?.strategy;
+  return (strategyId && strategyById(strategyId)) || activeStrategy();
+}
+
 export function allPositions(limit = 10) {
   return db.prepare('SELECT * FROM dry_run_positions ORDER BY id DESC LIMIT ?').all(limit);
 }
 
+function duplicateOpenPositionError(existing) {
+  const err = new Error(`open position already exists for this token (#${existing.id})`);
+  err.code = 'OPEN_POSITION_EXISTS';
+  err.positionId = existing.id;
+  err.position = existing;
+  return err;
+}
+
 export function createDryRunPosition(candidateId, candidate, decision, reason = 'llm_buy') {
-  const strat = activeStrategy();
+  const strat = strategyForCandidate(candidate);
   const sizeSol = strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1);
   const entryPrice = Number(candidate.metrics.priceUsd || 0) || null;
   const entryMcap = Number(candidate.metrics.marketCapUsd || candidate.metrics.graduatedMarketCapUsd || 0) || null;
-  const tp = Number(decision.suggested_tp_percent || strat.tp_percent || numSetting('default_tp_percent', 50));
-  const sl = Number(decision.suggested_sl_percent || strat.sl_percent || numSetting('default_sl_percent', -25));
+  const tp = Number(decision.suggested_tp_percent ?? strat.tp_percent ?? numSetting('default_tp_percent', 50));
+  const sl = Number(decision.suggested_sl_percent ?? strat.sl_percent ?? numSetting('default_sl_percent', -25));
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
   const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
 
   return db.transaction(() => {
-    const existing = db.prepare(`
-      SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'open' LIMIT 1
-    `).get(candidate.token.mint);
-    if (existing) return existing.id;
+    const existing = openPositionByMint(candidate.token.mint);
+    if (existing) throw duplicateOpenPositionError(existing);
 
     const result = db.prepare(`
       INSERT INTO dry_run_positions (
@@ -81,20 +102,18 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
 }
 
 export function createLivePosition(candidateId, candidate, decision, swap, reason = 'live_buy') {
-  const strat = activeStrategy();
+  const strat = strategyForCandidate(candidate);
   const sizeSol = strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1);
   const entryPrice = Number(candidate.metrics.priceUsd || 0) || null;
   const entryMcap = Number(candidate.metrics.marketCapUsd || candidate.metrics.graduatedMarketCapUsd || 0) || null;
-  const tp = Number(decision.suggested_tp_percent || strat.tp_percent || numSetting('default_tp_percent', 50));
-  const sl = Number(decision.suggested_sl_percent || strat.sl_percent || numSetting('default_sl_percent', -25));
+  const tp = Number(decision.suggested_tp_percent ?? strat.tp_percent ?? numSetting('default_tp_percent', 50));
+  const sl = Number(decision.suggested_sl_percent ?? strat.sl_percent ?? numSetting('default_sl_percent', -25));
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
   const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
 
   return db.transaction(() => {
-    const existing = db.prepare(`
-      SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'open' LIMIT 1
-    `).get(candidate.token.mint);
-    if (existing) return existing.id;
+    const existing = openPositionByMint(candidate.token.mint);
+    if (existing) throw duplicateOpenPositionError(existing);
 
     const result = db.prepare(`
       INSERT INTO dry_run_positions (

@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { JUPITER_API_KEY, JSON_HEADERS, TRENDING_LOOKBACK_MS } from '../config.js';
 import { now, json } from '../utils.js';
-import { numSetting, boolSetting, setting } from '../db/settings.js';
+import { activeStrategy, numSetting, boolSetting, setting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { gmgnBackoffActive, setGmgnBackoff, gmgnFetch, normalizedTrendingRows } from '../enrichment/gmgn.js';
 import { normalizeJupiterTrendingRow } from '../enrichment/jupiter.js';
@@ -20,15 +20,15 @@ export function storeSignalEvent(mint, kind, source, payload) {
   `).run(mint, kind, now(), source, json(payload));
 }
 
-export function trendingSignalPass(row) {
+export function trendingSignalPass(row, strat = activeStrategy()) {
   const volume = Number(row?.volume ?? 0);
   const swaps = Number(row?.swaps ?? 0);
   const rugRatio = Number(row?.rug_ratio ?? 0);
   const bundlerRate = Number(row?.bundler_rate ?? 0);
-  const minVolume = numSetting('trending_min_volume_usd', 0);
-  const minSwaps = numSetting('trending_min_swaps', 0);
-  const maxRugRatio = numSetting('trending_max_rug_ratio', 0.3);
-  const maxBundlerRate = numSetting('trending_max_bundler_rate', 0.5);
+  const minVolume = strat.trending_min_volume_usd ?? numSetting('trending_min_volume_usd', 0);
+  const minSwaps = strat.trending_min_swaps ?? numSetting('trending_min_swaps', 0);
+  const maxRugRatio = strat.trending_max_rug_ratio ?? numSetting('trending_max_rug_ratio', 0.3);
+  const maxBundlerRate = strat.trending_max_bundler_rate ?? numSetting('trending_max_bundler_rate', 0.5);
   if (minVolume > 0 && (!Number.isFinite(volume) || volume < minVolume)) return false;
   if (minSwaps > 0 && (!Number.isFinite(swaps) || swaps < minSwaps)) return false;
   if (maxRugRatio > 0 && Number.isFinite(rugRatio) && rugRatio > maxRugRatio) return false;
@@ -83,6 +83,7 @@ export async function fetchGmgnTrending() {
   const interval = setting('trending_interval', '5m');
   const limit = Math.max(1, Math.min(200, Math.floor(numSetting('trending_limit', 100))));
   const source = setting('trending_source', 'jupiter');
+  const strat = activeStrategy();
 
   try {
     const rows = source === 'gmgn'
@@ -96,7 +97,7 @@ export async function fetchGmgnTrending() {
     let tracked = 0;
     for (const [index, row] of rows.entries()) {
       const mint = row?.address || row?.mint;
-      if (!mint || !String(mint).endsWith('pump') || !trendingSignalPass(row)) continue;
+      if (!mint || !String(mint).endsWith('pump') || !trendingSignalPass(row, strat)) continue;
       const token = { ...row, address: mint, interval, rank: index + 1, seenAt };
       trending.set(mint, token);
       tracked += 1;

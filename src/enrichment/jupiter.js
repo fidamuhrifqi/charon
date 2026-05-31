@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { WSOL_MINT, JSON_HEADERS } from '../config.js';
 import { now } from '../utils.js';
+import { analyzeChartIndicators } from '../indicators/chart.js';
 
 const jupiterAssetCache = new Map();
 let jupiterAssetBackoffUntil = 0;
@@ -130,7 +131,7 @@ async function fetchJupiterHolders(mint) {
   }
 }
 
-function summarizeCandles(label, candles) {
+function summarizeCandles(label, candles, indicatorConfig = {}, options = {}) {
   if (!candles.length) return { label, available: false };
   const first = candles[0];
   const last = candles[candles.length - 1];
@@ -139,10 +140,10 @@ function summarizeCandles(label, candles) {
   const volumeNative = candles.reduce((sum, candle) => sum + Number(candle.volume || 0), 0);
   const current = Number(last.close);
   const start = Number(first.open);
-  return {
+  const summary = {
     label,
     available: true,
-    purpose: label === 'ath_context_24h_5m' ? 'ath_context' : 'range_context',
+    purpose: options.purpose || (label === 'ath_context_24h_5m' ? 'ath_context' : 'range_context'),
     candles: candles.length,
     fromTime: first.time,
     toTime: last.time,
@@ -154,9 +155,16 @@ function summarizeCandles(label, candles) {
     belowHighPercent: high > 0 ? (current / high - 1) * 100 : null,
     aboveLowPercent: low > 0 && Number.isFinite(low) ? (current / low - 1) * 100 : null,
   };
+  if (options.includeIndicators) {
+    summary.indicators = analyzeChartIndicators(candles, {
+      ...indicatorConfig,
+      indicator_timeframe: options.timeframe,
+    });
+  }
+  return summary;
 }
 
-async function fetchJupiterChartWindow(mint, interval, candles, label) {
+async function fetchJupiterChartWindow(mint, interval, candles, label, indicatorConfig = {}, options = {}) {
   const url = new URL(`https://datapi.jup.ag/v2/charts/${mint}`);
   url.searchParams.set('interval', interval);
   url.searchParams.set('to', String(now()));
@@ -167,19 +175,49 @@ async function fetchJupiterChartWindow(mint, interval, candles, label) {
     timeout: 10_000,
     headers: JSON_HEADERS,
   });
-  return summarizeCandles(label, Array.isArray(res.data?.candles) ? res.data.candles : []);
+  return summarizeCandles(label, Array.isArray(res.data?.candles) ? res.data.candles : [], indicatorConfig, options);
 }
 
-async function fetchJupiterChartContext(mint) {
+function indicatorWindowSpec(config = {}) {
+  const requested = String(config.indicator_timeframe || config.indicator_interval || '1m').toLowerCase();
+  if (requested === '5m' || requested === '5_minute' || requested === '5_min') {
+    return {
+      interval: '5_MINUTE',
+      candles: 288,
+      label: 'ath_context_24h_5m',
+      timeframe: '5m',
+    };
+  }
+  return {
+    interval: '1_MINUTE',
+    candles: 180,
+    label: 'indicator_context_3h_1m',
+    timeframe: '1m',
+  };
+}
+
+async function fetchJupiterChartContext(mint, indicatorConfig = {}) {
+  const indicatorSpec = indicatorWindowSpec(indicatorConfig);
   const windows = [
-    ['5_MINUTE', 288, 'ath_context_24h_5m'],
-    ['1_HOUR', 168, 'swing_7d_1h'],
-    ['4_HOUR', 180, 'long_30d_4h'],
-  ];
-  const results = await Promise.all(windows.map(([interval, candles, label]) => (
-    fetchJupiterChartWindow(mint, interval, candles, label).catch((err) => {
-      console.log(`[chart] ${mint.slice(0, 8)}... ${interval} ${err.message}`);
-      return { label, available: false, error: err.message };
+    indicatorSpec.timeframe === '1m' ? {
+      ...indicatorSpec,
+      includeIndicators: true,
+      purpose: 'indicator_context',
+    } : null,
+    {
+      interval: '5_MINUTE',
+      candles: 288,
+      label: 'ath_context_24h_5m',
+      timeframe: '5m',
+      includeIndicators: indicatorSpec.timeframe === '5m',
+    },
+    { interval: '1_HOUR', candles: 168, label: 'swing_7d_1h', timeframe: '1h' },
+    { interval: '4_HOUR', candles: 180, label: 'long_30d_4h', timeframe: '4h' },
+  ].filter(Boolean);
+  const results = await Promise.all(windows.map((window) => (
+    fetchJupiterChartWindow(mint, window.interval, window.candles, window.label, indicatorConfig, window).catch((err) => {
+      console.log(`[chart] ${mint.slice(0, 8)}... ${window.interval} ${err.message}`);
+      return { label: window.label, available: false, error: err.message };
     })
   )));
   const available = results.filter(row => row.available);
@@ -188,14 +226,16 @@ async function fetchJupiterChartContext(mint) {
   const topBlastRisk = Number.isFinite(Number(currentNative)) && Number.isFinite(Number(rangeHigh)) && rangeHigh > 0
     ? currentNative / rangeHigh >= 0.85
     : null;
+  const indicatorWindow = results.find(row => row.indicators?.available);
   return {
     quote: 'native',
-    purpose: 'ATH/range context, not momentum scoring',
+    purpose: 'ATH/range context plus indicator timing context',
     currentNative,
     rangeHighNative: rangeHigh,
     belowRangeHighPercent: currentNative && rangeHigh ? (currentNative / rangeHigh - 1) * 100 : null,
     distanceFromAthPercent: currentNative && rangeHigh ? (currentNative / rangeHigh - 1) * 100 : null,
     topBlastRisk,
+    indicators: indicatorWindow?.indicators || { available: false },
     windows: results,
   };
 }

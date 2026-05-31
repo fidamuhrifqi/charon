@@ -51,6 +51,7 @@ export async function generateLessons(summary) {
             'Return strict JSON only.',
             'Do not invent trades or outcomes.',
             'Create compact operational lessons that can improve the next screening prompt.',
+            'Do not create blanket rules that penalize low market cap by itself; sub-10k mcap can be high-upside for sniper/degen. Only warn on low mcap when paired with weak liquidity, weak swaps/volume, bad holder concentration, high bundler/rug signals, or fresh execution dumping.',
           ].join(' '),
         },
         {
@@ -89,8 +90,8 @@ export function storeLearningRun(windowMs, summary, lessons, raw) {
   `).run(now(), windowMs, json(summary), json(lessons), json(raw));
   const runId = Number(result.lastInsertRowid);
   const insert = db.prepare(`
-    INSERT INTO learning_lessons (run_id, created_at_ms, status, lesson, evidence_json)
-    VALUES (?, ?, 'active', ?, ?)
+    INSERT INTO learning_lessons (run_id, created_at_ms, status, author, lesson, evidence_json)
+    VALUES (?, ?, 'active', 'auto_learning', ?, ?)
   `);
   for (const item of lessons) insert.run(runId, now(), item.lesson, json(item.evidence || {}));
   return runId;

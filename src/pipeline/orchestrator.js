@@ -23,9 +23,10 @@ setDegenHandler(maybeProcessDegenCandidate);
 setCandidateHandler(processCandidateFromSignals);
 
 export async function processCandidateFromSignals(signals) {
+  const strat = activeStrategy();
   // Skip if max positions reached — don't waste enrichment/LLM calls
   if (!canOpenMorePositions()) {
-    const max = numSetting('max_open_positions', 3);
+    const max = strat.max_open_positions ?? numSetting('max_open_positions', 3);
     console.log(`[agent] max positions reached (${openPositionCount()}/${max}), skipping ${signals.mint.slice(0, 8)}...`);
     return;
   }
@@ -38,7 +39,6 @@ export async function processCandidateFromSignals(signals) {
     return;
   }
 
-  const strat = activeStrategy();
   let rows, batchDecision, batchId;
 
   if (!strat.use_llm) {
@@ -59,7 +59,7 @@ export async function processCandidateFromSignals(signals) {
     };
   } else {
     rows = recentEligibleCandidates(numSetting('llm_candidate_pick_count', 10));
-    batchDecision = await decideCandidateBatch(rows, candidateId);
+    batchDecision = await decideCandidateBatch(rows, candidateId, { tp_percent: strat.tp_percent, sl_percent: strat.sl_percent });
     batchId = storeBatchDecision(candidateId, rows, batchDecision);
   }
   const selectedRow = batchDecision.selected_row;
@@ -87,9 +87,9 @@ export async function processCandidateFromSignals(signals) {
 
   if (batchId) await sendBatchReveal(batchId, rows, batchDecision, candidateId);
 
-  if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= numSetting('llm_min_confidence', 75)) {
+  if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= (strat.llm_min_confidence ?? 65)) {
     if (!canOpenMorePositions()) {
-      const max = numSetting('max_open_positions', 3);
+      const max = strat.max_open_positions ?? numSetting('max_open_positions', 3);
       console.log(`[agent] max open positions reached (${openPositionCount()}/${max}), skipping buy ${selectedRow.candidate.token.mint}`);
       logDecisionEvent({
         batchId,
@@ -113,15 +113,16 @@ export async function processCandidateFromSignals(signals) {
       action: selectedRow ? 'entry_not_approved' : 'no_candidate_selected',
       guardrails: {
         agentEnabled: boolSetting('agent_enabled', true),
-        confidenceThreshold: numSetting('llm_min_confidence', 75),
+        confidenceThreshold: strat.llm_min_confidence ?? 65,
         openPositions: openPositionCount(),
-        maxOpenPositions: numSetting('max_open_positions', 3),
+        maxOpenPositions: strat.max_open_positions ?? numSetting('max_open_positions', 3),
       },
     });
   }
 }
 
 export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
+  const strat = activeStrategy();
   const mode = tradingMode();
   const freshSelectedRow = await refreshCandidateForExecution(selectedRow);
   const executionRows = rows.map(row => row.id === freshSelectedRow.id ? freshSelectedRow : row);
@@ -151,7 +152,47 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
   }
 
   if (mode === 'dry_run') {
-    const positionId = await createDryRunPosition(freshSelectedRow.id, freshSelectedRow.candidate, decision, `llm_batch_${batchId}`);
+    let positionId;
+    try {
+      positionId = await createDryRunPosition(freshSelectedRow.id, freshSelectedRow.candidate, decision, `llm_batch_${batchId}`);
+    } catch (err) {
+      if (err.code === 'OPEN_POSITION_EXISTS') {
+        const failures = [...new Set([...(freshSelectedRow.candidate.filters?.failures || []), err.message])];
+        const rejectedCandidate = {
+          ...freshSelectedRow.candidate,
+          filters: {
+            ...(freshSelectedRow.candidate.filters || {}),
+            passed: false,
+            failures,
+          },
+        };
+        const rejectedRow = { ...freshSelectedRow, candidate: rejectedCandidate };
+        const rejectedRows = executionRows.map(row => row.id === rejectedRow.id ? rejectedRow : row);
+        updateCandidateStatus(rejectedRow.id, 'stale_rejected');
+        logDecisionEvent({
+          batchId,
+          triggerCandidateId,
+          selectedRow: rejectedRow,
+          rows: rejectedRows,
+          decision,
+          mode,
+          action: 'entry_rejected_fresh_filters',
+          guardrails: {
+            failures,
+            refreshedAtMs: rejectedCandidate.executionRefresh?.refreshedAtMs,
+          },
+        });
+        await sendTelegram([
+          '🛑 <b>Execution rejected on fresh check</b>',
+          '',
+          candidateSummary(rejectedCandidate, decision),
+          '',
+          `Failures: ${escapeHtml(failures.join('; ') || 'fresh execution guard failed')}`,
+        ].join('\n'));
+        return;
+      }
+      throw err;
+    }
     logDecisionEvent({
       batchId,
       triggerCandidateId,
@@ -160,7 +201,7 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       decision,
       mode,
       action: 'dry_run_entry',
-      guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
+      guardrails: { maxOpenPositions: strat.max_open_positions ?? numSetting('max_open_positions', 3), openPositions: openPositionCount() },
       execution: { positionId },
     });
     await sendPositionOpen(positionId);
@@ -177,7 +218,7 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       decision,
       mode,
       action: 'confirm_intent_created',
-      guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
+      guardrails: { maxOpenPositions: strat.max_open_positions ?? numSetting('max_open_positions', 3), openPositions: openPositionCount() },
       execution: { intentId },
     });
     await sendTradeIntent(intentId, freshSelectedRow.candidate, decision);
@@ -187,6 +228,41 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
   try {
     await executeLiveBuy(freshSelectedRow, decision, batchId, executionRows, triggerCandidateId);
   } catch (err) {
+    if (err.code === 'OPEN_POSITION_EXISTS') {
+      const failures = [...new Set([...(freshSelectedRow.candidate.filters?.failures || []), err.message])];
+      const rejectedCandidate = {
+        ...freshSelectedRow.candidate,
+        filters: {
+          ...(freshSelectedRow.candidate.filters || {}),
+          passed: false,
+          failures,
+        },
+      };
+      const rejectedRow = { ...freshSelectedRow, candidate: rejectedCandidate };
+      const rejectedRows = executionRows.map(row => row.id === rejectedRow.id ? rejectedRow : row);
+      updateCandidateStatus(rejectedRow.id, 'stale_rejected');
+      logDecisionEvent({
+        batchId,
+        triggerCandidateId,
+        selectedRow: rejectedRow,
+        rows: rejectedRows,
+        decision,
+        mode,
+        action: 'entry_rejected_fresh_filters',
+        guardrails: {
+          failures,
+          refreshedAtMs: rejectedCandidate.executionRefresh?.refreshedAtMs,
+        },
+      });
+      await sendTelegram([
+        '🛑 <b>Execution rejected on fresh check</b>',
+        '',
+        candidateSummary(rejectedCandidate, decision),
+        '',
+        `Failures: ${escapeHtml(failures.join('; ') || 'fresh execution guard failed')}`,
+      ].join('\n'));
+      return;
+    }
     const intentId = createTradeIntent(freshSelectedRow.id, freshSelectedRow.candidate, decision, mode, 'execution_failed');
     logDecisionEvent({
       batchId,
@@ -196,7 +272,7 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       decision,
       mode,
       action: 'live_entry_failed',
-      guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
+      guardrails: { maxOpenPositions: strat.max_open_positions ?? numSetting('max_open_positions', 3), openPositions: openPositionCount() },
       execution: { intentId, error: err.message },
     });
     await sendTelegram([

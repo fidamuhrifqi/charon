@@ -1,9 +1,10 @@
 import { db } from './connection.js';
 import { now, safeJson, json } from '../utils.js';
-import { numSetting } from './settings.js';
+import { activeStrategy, numSetting } from './settings.js';
 
 export function createTradeIntent(candidateId, candidate, decision, mode, status, side = 'buy') {
-  const sizeSol = numSetting('dry_run_buy_sol', 0.1);
+  const strat = activeStrategy();
+  const sizeSol = strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1);
   const result = db.prepare(`
     INSERT INTO trade_intents (
       candidate_id, mint, mode, status, created_at_ms, updated_at_ms, side,
@@ -21,7 +22,7 @@ export function createTradeIntent(candidateId, candidate, decision, mode, status
     decision.confidence,
     decision.reason,
     decision.id || null,
-    json({ candidate, decision, mode, status }),
+    json({ candidate, decision, mode, status, strategy: strat }),
   );
   return Number(result.lastInsertRowid);
 }
