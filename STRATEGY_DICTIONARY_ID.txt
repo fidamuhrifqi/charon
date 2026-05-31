@@ -1,0 +1,286 @@
+KAMUS STRATEGI CHARON
+Terakhir diperbarui: 2026-05-30
+
+Tujuan:
+File ini adalah kamus sederhana untuk memahami field config strategi di Charon.
+Fungsinya sebagai pengingat cepat saat mengubah setting degen/sniper dari Telegram.
+
+
+DASAR STRATEGI AKTIF
+
+use_llm
+  true  = kandidat dikirim dulu ke LLM sebelum keputusan buy.
+  false = rule-based; kalau filter lolos, Charon langsung buy / simpan posisi dry-run.
+
+position_size_sol
+  Ukuran modal SOL per posisi.
+
+max_open_positions
+  Batas jumlah posisi yang boleh open bersamaan.
+
+
+FILTER SOURCE / ROUTE
+
+source_gate_enabled
+  Mengaktifkan validasi jalur source sebelum kandidat masuk screening.
+
+source_require_fee
+  Token wajib punya sinyal fee claim.
+
+source_require_graduated
+  Token wajib punya sinyal graduated.
+
+source_require_trending
+  Token wajib punya sinyal trending.
+
+min_source_count
+  Fallback gate berdasarkan jumlah source.
+  Kalau source_require_* aktif dan min_source_count = 0, maka yang dipakai hanya boolean route.
+
+Intent degen sekarang:
+  source_require_trending = true
+  source_require_fee = false
+  source_require_graduated = false
+  min_source_count = 0
+
+Artinya:
+  Trending wajib ada.
+  Fee-only dan graduated-only tidak lolos karena tidak trending.
+
+
+FILTER MARKET CAP / TRENDING
+
+min_mcap_usd
+  Market cap minimum yang boleh entry.
+
+max_mcap_usd
+  Market cap maksimum yang boleh entry.
+
+trending_min_volume_usd
+  Minimal volume trending yang dibutuhkan.
+
+trending_min_swaps
+  Minimal jumlah swap trending yang dibutuhkan.
+
+min_gmgn_total_fee_sol
+  Minimal total fee GMGN.
+  Set 0 kalau fee tidak mau dijadikan syarat entry.
+
+max_top20_holder_percent
+  Batas maksimal persentase token yang dipegang top holder.
+  Makin rendah = makin ketat terhadap risiko rug / konsentrasi holder.
+
+
+FILTER BUY PRESSURE
+
+buy_pressure_guard_enabled
+  Mengaktifkan filter rasio buy/sell umum.
+
+buy_pressure_min_ratio
+  Minimal rasio buy/sell GMGN 5 menit.
+  Contoh: 1.1 berarti jumlah buy minimal 10% lebih besar dari sell.
+
+bb_buy_pressure_guard_enabled
+  Mengaktifkan guard khusus saat posisi Bollinger/BBRSI sudah tinggi.
+
+bb_buy_pressure_min_band_pos
+  Level band ketika guard BB buy pressure mulai aktif.
+  Contoh: 80 berarti guard ini hanya aktif kalau posisi BB sudah 80% atau lebih.
+
+bb_buy_pressure_min_ratio
+  Minimal rasio buy/sell yang dibutuhkan saat BB sedang tinggi.
+
+
+INDIKATOR CHART
+
+chart_indicators_enabled
+  Mengaktifkan kalkulasi indikator chart.
+
+chart_indicators_hard_filter
+  Kalau true, kegagalan indikator bisa langsung block entry.
+
+indicator_timeframe
+  Timeframe candle. Preferensi sekarang: 1m.
+
+supertrend_required
+  Kalau true, Supertrend bearish akan block entry saat indikatornya sudah ready.
+
+rsi_guard_enabled
+  Mengaktifkan guard RSI untuk entry.
+
+rsi_min
+  Batas RSI minimum untuk entry.
+  Terlalu rendah bisa berarti momentum masih lemah.
+
+rsi_max
+  Batas RSI maksimum untuk entry.
+  Terlalu tinggi bisa berarti entry sudah telat / overheat.
+
+bbrsi_guard_enabled
+  Mengaktifkan guard BBRSI overheat.
+
+bbrsi_overbought_rsi
+  Batas RSI untuk kondisi BBRSI overheat.
+
+bbrsi_max_band_pos
+  Batas posisi Bollinger Band untuk kondisi BBRSI overheat.
+
+bb_period
+  Jumlah candle yang dipakai untuk menghitung Bollinger Band.
+
+bb_stddev
+  Standar deviasi Bollinger Band.
+
+
+TAKE PROFIT / TRAILING
+
+tp_percent
+  Target profit.
+  Kalau trailing off, TP akan close langsung.
+  Kalau trailing on, TP biasanya menjadi trigger untuk mengaktifkan trailing logic.
+
+trailing_enabled
+  Mengaktifkan trailing TP.
+
+trailing_percent
+  Fallback persentase turun dari high mcap untuk trailing biasa.
+  Contoh: high mcap 20k dan trailing 10 berarti trigger close saat mcap turun sekitar 10% dari high.
+
+trailing_tiers_enabled
+  Mengaktifkan trailing bertingkat.
+  Saat on, tier akan menggantikan trailing sederhana kalau trigger tier tercapai.
+
+trailing_floor_at_percent
+  Level profit ketika floor protection mulai aktif.
+
+trailing_floor_percent
+  Profit minimum yang ingin diamankan setelah floor aktif.
+
+trailing_tier_1_at_percent / trailing_tier_1_percent
+trailing_tier_2_at_percent / trailing_tier_2_percent
+trailing_tier_3_at_percent / trailing_tier_3_percent
+trailing_tier_4_at_percent / trailing_tier_4_percent
+  Trigger tier dan jarak trailing.
+  Contoh: 60 => 20 berarti setelah peak profit menyentuh 60%, posisi close kalau mcap turun 20% dari high mcap.
+  Ini bukan 60 - 20 = 40% PnL. Basisnya adalah penurunan market cap dari titik tertinggi.
+
+Catatan trailing:
+  Trailing/floor hanya boleh close kalau current PnL masih positif.
+  Kalau harga sudah ketarik sampai minus, Charon tidak akan close dengan alasan trailing/floor.
+  Posisi akan lanjut dipantau oleh soft SL, hard SL, max hold, atau exit rule lain.
+
+
+STOP LOSS DENGAN KONFIRMASI INDIKATOR
+
+sl_confirmation_enabled
+  Mengaktifkan logic soft SL + hard SL.
+
+sl_soft_percent
+  Level soft SL.
+  Saat kena level ini, posisi tidak langsung close.
+  Charon akan cek konfirmasi indikator dulu.
+
+sl_hard_percent
+  Level hard SL.
+  Saat kena level ini, posisi langsung close tanpa konfirmasi indikator.
+
+sl_percent
+  Field SL posisi yang sudah ada dari logic lama.
+  Kalau SL confirmation aktif, nilainya idealnya sama dengan hard SL untuk display dan default posisi.
+
+sl_confirm_min_bad_signals
+  Jumlah minimal sinyal buruk yang dibutuhkan agar posisi close di soft SL.
+
+sl_confirm_rsi_below
+  Dianggap sinyal buruk kalau RSI lebih kecil atau sama dengan angka ini.
+
+sl_confirm_bb_below
+  Dianggap sinyal buruk kalau posisi Bollinger/BBRSI lebih kecil atau sama dengan angka ini.
+
+sl_confirm_buy_pressure_below
+  Dianggap sinyal buruk kalau rasio buy/sell GMGN 5 menit lebih kecil atau sama dengan angka ini.
+
+sl_confirm_supertrend_bearish
+  Kalau true, Supertrend bearish dihitung sebagai satu sinyal buruk.
+
+Behavior yang dituju sekarang:
+  Soft SL = -20%
+  Hard SL = -50%
+  Close di soft SL hanya kalau minimal 2 sinyal buruk muncul.
+
+Kenapa dibuat begini:
+  Kita main di token low mcap.
+  Token low mcap sangat mudah wick / turun 20-50% dalam waktu singkat.
+  Tujuannya bukan membiarkan semua loss, tapi menghindari posisi yang masih hidup secara struktur keburu dimatikan.
+  Kalau struktur sudah jelek, soft SL tetap bisa close.
+  Kalau jeblok parah sampai hard SL, posisi tetap diputus.
+
+
+EARLY EXIT / MAX HOLD
+
+early_loss_guard_enabled
+  Exit early weakness versi lama.
+  Kalau ini on, posisi bisa close sebelum soft SL.
+  Untuk degen yang ingin memberi ruang floating, biasanya ini lebih baik off.
+
+early_exit_enabled
+  Exit stagnan lebih awal.
+  Bisa close kalau token tidak mencapai peak profit minimum setelah waktu tertentu.
+
+early_exit_confirmation_enabled
+  Mengaktifkan konfirmasi indikator untuk early stagnation.
+  Kalau on, early stagnation tidak langsung close saat syarat waktu/peak/current terpenuhi.
+  Charon akan cek sinyal buruk yang sama seperti soft SL.
+
+early_exit_check_after_ms
+  Kapan pengecekan early stagnation mulai dilakukan.
+
+early_exit_min_peak_pnl_percent
+  Peak profit minimum agar posisi tidak dianggap stagnan.
+
+early_exit_max_current_pnl_percent
+  Batas current PnL untuk exit stagnan.
+
+Catatan early stagnation confirmation:
+  Ini cocok untuk token low mcap yang sering diam sebentar lalu bergerak.
+  Kalau token belum mencapai peak minimum, tapi RSI/BB/buy pressure/Supertrend masih oke, posisi akan tetap di-hold.
+  Kalau struktur ikut jelek, barulah early stagnation boleh close.
+
+max_hold_ms
+  Maksimal waktu hold posisi.
+  0 berarti off.
+
+
+COOLDOWN
+
+profit_cooldown_enabled
+  Mengaktifkan cooldown berdasarkan mint setelah pola profit/loss tertentu.
+
+profit_cooldown_min_profit_percent
+  Batas profit agar close tersebut dihitung sebagai win cooldown.
+
+profit_cooldown_max_wins
+  Jumlah win yang memenuhi syarat sebelum token kena cooldown.
+
+profit_cooldown_min_loss_percent
+  Batas loss agar close tersebut dihitung sebagai loss cooldown.
+  Nilainya dibaca secara absolut.
+
+profit_cooldown_max_losses
+  Jumlah loss yang memenuhi syarat sebelum token kena cooldown.
+
+profit_cooldown_minutes
+  Durasi cooldown.
+
+
+FRESH EXECUTION GUARD
+
+fresh_mcap_dump_guard_enabled
+  Mengaktifkan fresh check terhadap snapshot sebelum buy.
+
+fresh_mcap_max_drop_percent
+  Block entry kalau mcap fresh turun sebesar ini dari snapshot kandidat.
+
+Contoh:
+  fresh_mcap_max_drop_percent = 7
+  Kalau mcap kandidat 30k dan mcap fresh 27.9k atau lebih rendah, entry akan diblock.

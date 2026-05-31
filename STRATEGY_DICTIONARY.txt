@@ -1,0 +1,281 @@
+CHARON STRATEGY DICTIONARY
+Last updated: 2026-05-30
+
+Purpose:
+This file is a plain-language dictionary for strategy config fields in Charon.
+It is meant as a quick reminder when adjusting degen/sniper settings from Telegram.
+
+
+ACTIVE STRATEGY BASICS
+
+use_llm
+  true  = candidate goes to LLM before buy decision.
+  false = rule-based; if filters pass, Charon buys/stores dry-run position.
+
+position_size_sol
+  SOL size per position.
+
+max_open_positions
+  Maximum open positions at one time.
+
+
+SOURCE / ROUTE FILTERS
+
+source_gate_enabled
+  Enables source route checks before candidate screening.
+
+source_require_fee
+  Requires token to have fee claim signal.
+
+source_require_graduated
+  Requires token to have graduated signal.
+
+source_require_trending
+  Requires token to have trending signal.
+
+min_source_count
+  Fallback source count gate.
+  If source_require_* booleans are active and min_source_count is 0, only the boolean route matters.
+
+Current degen intent:
+  source_require_trending = true
+  source_require_fee = false
+  source_require_graduated = false
+  min_source_count = 0
+
+Meaning:
+  Trending is required.
+  Fee-only and graduated-only do not pass because they are not trending.
+
+
+MARKET CAP / TRENDING FILTERS
+
+min_mcap_usd
+  Minimum market cap allowed at entry.
+
+max_mcap_usd
+  Maximum market cap allowed at entry.
+
+trending_min_volume_usd
+  Minimum trending volume required.
+
+trending_min_swaps
+  Minimum trending swaps required.
+
+min_gmgn_total_fee_sol
+  Minimum total GMGN fee.
+  Set to 0 if fee should not be an entry requirement.
+
+max_top20_holder_percent
+  Maximum concentration held by top holders.
+  Lower = stricter rug/concentration guard.
+
+
+BUY PRESSURE FILTERS
+
+buy_pressure_guard_enabled
+  Enables general buy/sell ratio filter.
+
+buy_pressure_min_ratio
+  Minimum GMGN 5m buy/sell ratio required.
+  Example: 1.1 means buys should be at least 10% higher than sells.
+
+bb_buy_pressure_guard_enabled
+  Enables special overheat guard when Bollinger/BBRSI band is high.
+
+bb_buy_pressure_min_band_pos
+  Band position where BB buy pressure guard starts.
+  Example: 80 means only apply this guard when BB position is 80% or higher.
+
+bb_buy_pressure_min_ratio
+  Minimum buy/sell ratio required when BB is high.
+
+
+CHART INDICATORS
+
+chart_indicators_enabled
+  Enables chart indicator calculation.
+
+chart_indicators_hard_filter
+  If true, indicator failures block entry.
+
+indicator_timeframe
+  Candle timeframe. Current preferred value is 1m.
+
+supertrend_required
+  If true, bearish Supertrend blocks entry when indicator is ready.
+
+rsi_guard_enabled
+  Enables RSI entry guard.
+
+rsi_min
+  Minimum RSI allowed for entry.
+  Too low can mean weak momentum.
+
+rsi_max
+  Maximum RSI allowed for entry.
+  Too high can mean late/overheated entry.
+
+bbrsi_guard_enabled
+  Enables BBRSI overheat guard.
+
+bbrsi_overbought_rsi
+  RSI threshold for BBRSI overheat.
+
+bbrsi_max_band_pos
+  Bollinger band position threshold for BBRSI overheat.
+
+bb_period
+  Bollinger Band candle period.
+
+bb_stddev
+  Bollinger Band standard deviation.
+
+
+TAKE PROFIT / TRAILING
+
+tp_percent
+  Profit target. If trailing is off, TP closes immediately.
+  If trailing is on, TP usually arms trailing logic.
+
+trailing_enabled
+  Enables trailing TP.
+
+trailing_percent
+  Fallback trailing drop percentage from high market cap.
+  Example: if high mcap is 20k and trailing is 10, close triggers when mcap drops about 10% from the high.
+
+trailing_tiers_enabled
+  Enables tiered trailing. When on, tiers override simple trailing when triggered.
+
+trailing_floor_at_percent
+  Profit level where floor protection starts.
+
+trailing_floor_percent
+  Minimum profit floor after floor is armed.
+
+trailing_tier_1_at_percent / trailing_tier_1_percent
+trailing_tier_2_at_percent / trailing_tier_2_percent
+trailing_tier_3_at_percent / trailing_tier_3_percent
+trailing_tier_4_at_percent / trailing_tier_4_percent
+  Tier trigger and trailing amount.
+  Example: 60 => 20 means after peak profit reaches 60%, close if mcap drops 20% from high mcap.
+  This is not 60 - 20 = 40% PnL. The basis is market-cap drop from the high.
+
+Trailing note:
+  Trailing/floor exits only run while current PnL is still positive.
+  If price is pulled below entry, Charon will not close with trailing/floor.
+  The position stays under soft SL, hard SL, max hold, or other exit rules.
+
+
+STOP LOSS WITH INDICATOR CONFIRMATION
+
+sl_confirmation_enabled
+  Enables soft/hard SL logic.
+
+sl_soft_percent
+  Soft SL level.
+  Hitting this does not close automatically.
+  Charon checks indicator confirmation first.
+
+sl_hard_percent
+  Hard SL level.
+  Hitting this closes immediately, no indicator confirmation.
+
+sl_percent
+  Existing position SL field.
+  With SL confirmation enabled, this should usually match hard SL for display/position defaults.
+
+sl_confirm_min_bad_signals
+  Number of bad signals needed to close at soft SL.
+
+sl_confirm_rsi_below
+  Bad signal if RSI is below or equal to this value.
+
+sl_confirm_bb_below
+  Bad signal if Bollinger/BBRSI band position is below or equal to this value.
+
+sl_confirm_buy_pressure_below
+  Bad signal if GMGN 5m buy/sell ratio is below or equal to this value.
+
+sl_confirm_supertrend_bearish
+  If true, bearish Supertrend counts as one bad signal.
+
+Current intended behavior:
+  Soft SL = -20%
+  Hard SL = -50%
+  Close at soft SL only if at least 2 bad signals appear.
+
+Why:
+  Low mcap tokens can wick/drop 20-50% quickly.
+  The goal is to avoid killing positions that are floating but still structurally alive.
+
+
+EARLY EXIT / MAX HOLD
+
+early_loss_guard_enabled
+  Old early weakness exit.
+  If this is on, it can close before soft SL.
+  For floating-first degen, this should usually be off.
+
+early_exit_enabled
+  Early stagnation exit.
+  Can close if token does not make enough peak profit after a set time.
+
+early_exit_confirmation_enabled
+  Enables indicator confirmation for early stagnation.
+  If on, early stagnation does not close immediately when time/peak/current conditions are met.
+  Charon checks the same bad signals used by soft SL.
+
+early_exit_check_after_ms
+  When early stagnation check starts.
+
+early_exit_min_peak_pnl_percent
+  Minimum peak required to avoid early stagnation.
+
+early_exit_max_current_pnl_percent
+  Current PnL threshold for early stagnation exit.
+
+Early stagnation confirmation note:
+  This fits low mcap tokens that can pause briefly before moving.
+  If the token has not reached the minimum peak yet but RSI/BB/buy pressure/Supertrend still look acceptable, the position stays open.
+  If structure also looks bad, early stagnation can close.
+
+max_hold_ms
+  Maximum hold time.
+  0 means off.
+
+
+COOLDOWN
+
+profit_cooldown_enabled
+  Enables cooldown by mint after profit/loss patterns.
+
+profit_cooldown_min_profit_percent
+  Profit threshold to count as cooldown win.
+
+profit_cooldown_max_wins
+  Number of qualifying wins before cooldown blocks.
+
+profit_cooldown_min_loss_percent
+  Loss threshold to count as cooldown loss.
+  Treated by absolute value.
+
+profit_cooldown_max_losses
+  Number of qualifying losses before cooldown blocks.
+
+profit_cooldown_minutes
+  Cooldown duration.
+
+
+FRESH EXECUTION GUARD
+
+fresh_mcap_dump_guard_enabled
+  Enables fresh check against snapshot before buy.
+
+fresh_mcap_max_drop_percent
+  Blocks entry if fresh mcap dropped this much from the candidate snapshot.
+
+Example:
+  fresh_mcap_max_drop_percent = 7
+  If candidate mcap was 30k and fresh mcap is 27.9k or lower, entry is blocked.
