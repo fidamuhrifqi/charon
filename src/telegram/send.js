@@ -3,10 +3,11 @@ import { TELEGRAM_CHAT_ID, TELEGRAM_TOPIC_ID } from '../config.js';
 import { now, json } from '../utils.js';
 import { db } from '../db/connection.js';
 import { escapeHtml, fmtPct, fmtSol, fmtUsd, short, gmgnLink } from '../format.js';
-import { numSetting } from '../db/settings.js';
+import { activeStrategy, numSetting } from '../db/settings.js';
 import { candidateSummary, compactCandidateLine, batchRevealSummary, formatPosition } from './format.js';
-import { candidateButtons, batchRevealButtons, positionButtons, intentButtons } from './menus.js';
+import { candidateButtons, batchRevealButtons, intentButtons } from './menus.js';
 import { batchById } from '../db/decisions.js';
+import { intentById } from '../db/intents.js';
 
 export async function sendTelegram(text, extra = {}) {
   return bot.sendMessage(TELEGRAM_CHAT_ID, text, {
@@ -58,7 +59,7 @@ export async function sendBatch(chatId, batchId) {
     text: `${index + 1}. ${row.candidate.token?.symbol || short(row.candidate.token?.mint || '')}`,
     callback_data: `cand:${row.id}`,
   }]));
-  keyboard.push([{ text: 'Positions', callback_data: 'menu:positions' }]);
+  keyboard.push([{ text: 'Open Positions', callback_data: 'menu:positions' }]);
   return bot.sendMessage(chatId, lines.filter(Boolean).join('\n'), {
     parse_mode: 'HTML',
     disable_web_page_preview: true,
@@ -69,21 +70,29 @@ export async function sendBatch(chatId, batchId) {
 export async function sendPositionOpen(positionId) {
   const position = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(positionId);
   const label = position?.execution_mode === 'live' ? 'Live buy executed' : 'Dry-run buy stored';
-  if (position) await sendTelegram(`✅ <b>${label}</b>\n\n${formatPosition(position)}`, positionButtons(positionId));
+  if (position) await sendTelegram(`✅ <b>${label}</b>\n\n${formatPosition(position)}`);
 }
 
 export async function sendPositionExit(position) {
-  const label = position?.execution_mode === 'live' ? 'Live exit' : 'Dry-run exit';
-  await sendTelegram(`🏁 <b>${label}: ${escapeHtml(position.exitReason)}</b>\n\n${formatPosition({ ...position, status: 'closed' })}`);
+  const exitReason = position.exitReason || position.exit_reason || 'closed';
+  await sendTelegram(formatPosition({
+    ...position,
+    status: 'closed',
+    exitReason,
+    exit_reason: exitReason,
+  }));
 }
 
 export async function sendTradeIntent(intentId, candidate, decision) {
+  const intent = intentById(intentId);
+  const strat = activeStrategy();
+  const sizeSol = Number(intent?.size_sol ?? intent?.payload?.strategy?.position_size_sol ?? strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1));
   await sendTelegram([
     '🧾 <b>Trade intent awaiting confirmation</b>',
     '',
     candidateSummary(candidate, decision),
     '',
-    `Size: <b>${fmtSol(numSetting('dry_run_buy_sol', 0.1))} SOL</b>`,
+    `Size: <b>${fmtSol(sizeSol)} SOL</b>`,
     'Execution: confirmation required before signing.',
   ].join('\n'), intentButtons(intentId));
 }

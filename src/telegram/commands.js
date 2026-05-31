@@ -1,11 +1,12 @@
 import { bot } from './bot.js';
 import { TELEGRAM_CHAT_ID } from '../config.js';
-import { now, json } from '../utils.js';
+import { now, json, parseDurationInput } from '../utils.js';
 import { escapeHtml, fmtPct } from '../format.js';
 import { db } from '../db/connection.js';
 import { numSetting, boolSetting, setSetting, activeStrategy, setActiveStrategy, strategyById, updateStrategyConfig } from '../db/settings.js';
 import { candidateById, latestCandidateByMint, updateCandidateStatus } from '../db/candidates.js';
 import { storeDecision, logDecisionEvent } from '../db/decisions.js';
+import { openPositions } from '../db/positions.js';
 import {
   menuKeyboard,
   filtersText,
@@ -16,12 +17,13 @@ import {
   mainMenuText,
   walletsText,
   positionsText,
+  openPositionsKeyboard,
   candidateButtons,
   positionButtons,
   strategyMenuText,
   strategyKeyboard,
 } from './menus.js';
-import { sendTelegram, sendBatch, sendPositionOpen } from './send.js';
+import { sendBatch, sendPositionOpen } from './send.js';
 import { candidateSummary, formatPosition } from './format.js';
 import { refreshPosition } from '../execution/positions.js';
 import { executeLiveSell } from '../execution/router.js';
@@ -56,16 +58,21 @@ export async function handleMessage(msg) {
     const [, id, key, ...rest] = parts;
     const value = rest.join(' ');
     if (!id || !key || !value) {
-      return bot.sendMessage(chatId, 'Usage: /stratset <strategy_id> <key> <value>\n\nExample: /stratset sniper tp_percent 75\n\nKeys: tp_percent, sl_percent, position_size_sol, max_open_positions, min_mcap_usd, max_mcap_usd, min_holders, trailing_enabled, trailing_percent, partial_tp, partial_tp_at_percent, partial_tp_sell_percent, max_hold_ms, use_llm, llm_min_confidence, min_source_count, require_fee_claim, min_fee_claim_sol, min_gmgn_total_fee_sol, max_ath_distance_pct');
+      return bot.sendMessage(chatId, 'Usage: /stratset <strategy_id> <key> <value>\n\nExample: /stratset sniper tp_percent 75\nExample: /stratset sniper early_exit_check_after_ms 90s\nExample: /stratset sniper early_loss_window_ms 3m\nExample: /stratset degen max_hold_ms 45m\n\nKeys include: tp_percent, sl_percent, position_size_sol, max_open_positions, max_hold_ms, early_exit_enabled, early_exit_check_after_ms, early_exit_min_peak_pnl_percent, early_exit_max_current_pnl_percent, early_loss_guard_enabled, early_loss_check_after_ms, early_loss_window_ms, early_loss_exit_pnl_percent');
     }
     const strat = strategyById(id);
     if (!strat) return bot.sendMessage(chatId, `Strategy "${id}" not found.`);
-    const numKeys = new Set(['tp_percent', 'sl_percent', 'position_size_sol', 'max_open_positions', 'min_mcap_usd', 'max_mcap_usd', 'min_holders', 'max_top20_holder_percent', 'trailing_percent', 'partial_tp_at_percent', 'partial_tp_sell_percent', 'max_hold_ms', 'llm_min_confidence', 'min_source_count', 'min_fee_claim_sol', 'min_gmgn_total_fee_sol', 'max_ath_distance_pct', 'token_age_max_ms', 'trending_min_volume_usd', 'trending_min_swaps', 'trending_max_rug_ratio', 'trending_max_bundler_rate', 'min_saved_wallet_holders', 'min_graduated_volume_usd']);
-    const boolKeys = new Set(['trailing_enabled', 'partial_tp', 'use_llm', 'require_fee_claim']);
+    const numKeys = new Set(['tp_percent', 'sl_percent', 'sl_soft_percent', 'sl_hard_percent', 'sl_confirm_min_bad_signals', 'sl_confirm_rsi_below', 'sl_confirm_bb_below', 'sl_confirm_buy_pressure_below', 'position_size_sol', 'max_open_positions', 'min_mcap_usd', 'max_mcap_usd', 'min_holders', 'max_top20_holder_percent', 'trailing_percent', 'trailing_floor_at_percent', 'trailing_floor_percent', 'trailing_tier_1_at_percent', 'trailing_tier_1_percent', 'trailing_tier_2_at_percent', 'trailing_tier_2_percent', 'trailing_tier_3_at_percent', 'trailing_tier_3_percent', 'trailing_tier_4_at_percent', 'trailing_tier_4_percent', 'profit_cooldown_min_profit_percent', 'profit_cooldown_max_wins', 'profit_cooldown_min_loss_percent', 'profit_cooldown_max_losses', 'profit_cooldown_minutes', 'partial_tp_at_percent', 'partial_tp_sell_percent', 'max_hold_ms', 'early_exit_check_after_ms', 'early_exit_min_peak_pnl_percent', 'early_exit_max_current_pnl_percent', 'early_loss_check_after_ms', 'early_loss_window_ms', 'early_loss_exit_pnl_percent', 'llm_min_confidence', 'min_source_count', 'min_fee_claim_sol', 'min_gmgn_total_fee_sol', 'max_ath_distance_pct', 'token_age_max_ms', 'trending_min_volume_usd', 'trending_min_swaps', 'trending_max_rug_ratio', 'trending_max_bundler_rate', 'min_saved_wallet_holders', 'min_graduated_volume_usd', 'supertrend_atr_period', 'supertrend_multiplier', 'rsi_period', 'rsi_min', 'rsi_max', 'bbrsi_overbought_rsi', 'bbrsi_max_band_pos', 'bb_buy_pressure_min_band_pos', 'bb_buy_pressure_min_ratio', 'buy_pressure_min_ratio', 'fresh_mcap_max_drop_percent', 'bb_period', 'bb_stddev']);
+    const boolKeys = new Set(['trailing_enabled', 'trailing_tiers_enabled', 'profit_cooldown_enabled', 'early_exit_enabled', 'early_exit_confirmation_enabled', 'early_loss_guard_enabled', 'partial_tp', 'use_llm', 'require_fee_claim', 'source_gate_enabled', 'source_require_fee', 'source_require_graduated', 'source_require_trending', 'chart_indicators_enabled', 'chart_indicators_hard_filter', 'supertrend_required', 'rsi_guard_enabled', 'bbrsi_guard_enabled', 'bb_buy_pressure_guard_enabled', 'buy_pressure_guard_enabled', 'fresh_mcap_dump_guard_enabled', 'sl_confirmation_enabled', 'sl_confirm_supertrend_bearish']);
+    const durationKeys = new Set(['max_hold_ms', 'early_exit_check_after_ms', 'early_loss_check_after_ms', 'early_loss_window_ms']);
     const newConfig = { ...strat };
     delete newConfig.id;
     delete newConfig.name;
-    if (numKeys.has(key)) {
+    if (durationKeys.has(key)) {
+      const parsed = parseDurationInput(value);
+      if (parsed == null) return bot.sendMessage(chatId, `Invalid ${key}. Use 90s, 45m, 1h, 1h30m, 2h, or off.`);
+      newConfig[key] = parsed;
+    } else if (numKeys.has(key)) {
       newConfig[key] = Number(value);
     } else if (boolKeys.has(key)) {
       newConfig[key] = value === 'true' || value === '1' || value === 'yes';
@@ -138,6 +145,26 @@ export async function handleMessage(msg) {
     if (!valid.has(key) || value == null) {
       return bot.sendMessage(chatId, `Usage: /setfilter &lt;name&gt; &lt;value&gt;\n\n${filtersText()}`, { parse_mode: 'HTML' });
     }
+    const strategyNumKeys = new Set(['tp_percent', 'sl_percent', 'sl_soft_percent', 'sl_hard_percent', 'sl_confirm_min_bad_signals', 'sl_confirm_rsi_below', 'sl_confirm_bb_below', 'sl_confirm_buy_pressure_below', 'position_size_sol', 'max_open_positions', 'min_mcap_usd', 'max_mcap_usd', 'min_holders', 'max_top20_holder_percent', 'trailing_percent', 'trailing_floor_at_percent', 'trailing_floor_percent', 'trailing_tier_1_at_percent', 'trailing_tier_1_percent', 'trailing_tier_2_at_percent', 'trailing_tier_2_percent', 'trailing_tier_3_at_percent', 'trailing_tier_3_percent', 'trailing_tier_4_at_percent', 'trailing_tier_4_percent', 'profit_cooldown_min_profit_percent', 'profit_cooldown_max_wins', 'profit_cooldown_min_loss_percent', 'profit_cooldown_max_losses', 'profit_cooldown_minutes', 'partial_tp_at_percent', 'partial_tp_sell_percent', 'max_hold_ms', 'early_exit_check_after_ms', 'early_exit_min_peak_pnl_percent', 'early_exit_max_current_pnl_percent', 'early_loss_check_after_ms', 'early_loss_window_ms', 'early_loss_exit_pnl_percent', 'llm_min_confidence', 'min_source_count', 'min_fee_claim_sol', 'min_gmgn_total_fee_sol', 'max_ath_distance_pct', 'token_age_max_ms', 'trending_min_volume_usd', 'trending_min_swaps', 'trending_max_rug_ratio', 'trending_max_bundler_rate', 'min_saved_wallet_holders', 'min_graduated_volume_usd', 'supertrend_atr_period', 'supertrend_multiplier', 'rsi_period', 'rsi_min', 'rsi_max', 'bbrsi_overbought_rsi', 'bbrsi_max_band_pos', 'bb_buy_pressure_min_band_pos', 'bb_buy_pressure_min_ratio', 'buy_pressure_min_ratio', 'fresh_mcap_max_drop_percent', 'bb_period', 'bb_stddev']);
+    const strategyBoolKeys = new Set(['trailing_enabled', 'trailing_tiers_enabled', 'profit_cooldown_enabled', 'early_exit_enabled', 'early_exit_confirmation_enabled', 'early_loss_guard_enabled', 'partial_tp', 'use_llm', 'require_fee_claim', 'source_gate_enabled', 'source_require_fee', 'source_require_graduated', 'source_require_trending', 'chart_indicators_enabled', 'chart_indicators_hard_filter', 'supertrend_required', 'rsi_guard_enabled', 'bbrsi_guard_enabled', 'bb_buy_pressure_guard_enabled', 'buy_pressure_guard_enabled', 'fresh_mcap_dump_guard_enabled', 'sl_confirmation_enabled', 'sl_confirm_supertrend_bearish']);
+    const durationKeys = new Set(['max_hold_ms', 'early_exit_check_after_ms', 'early_loss_check_after_ms', 'early_loss_window_ms']);
+    if (strategyNumKeys.has(key) || strategyBoolKeys.has(key)) {
+      const strat = activeStrategy();
+      const newConfig = { ...strat };
+      delete newConfig.id;
+      delete newConfig.name;
+      if (durationKeys.has(key)) {
+        const parsed = parseDurationInput(value);
+        if (parsed == null) return bot.sendMessage(chatId, `Invalid ${key}. Use 90s, 45m, 1h, 1h30m, 2h, or off.`);
+        newConfig[key] = parsed;
+      } else if (strategyNumKeys.has(key)) {
+        newConfig[key] = Number(value === 'off' ? 0 : value);
+      } else {
+        newConfig[key] = value === 'true' || value === '1' || value === 'yes' || value === 'on';
+      }
+      updateStrategyConfig(strat.id, newConfig);
+      return bot.sendMessage(chatId, strategyMenuText(), { parse_mode: 'HTML', ...strategyKeyboard() });
+    }
     setSetting(key, value === 'off' ? '0' : value);
     return bot.sendMessage(chatId, filtersText(), { parse_mode: 'HTML' });
   }
@@ -155,9 +182,11 @@ export async function sendCandidate(chatId, id) {
 }
 
 export async function sendPositions(chatId) {
-  const rows = allPositions(12);
-  const text = rows.length ? rows.map(formatPosition).join('\n\n') : 'No dry-run positions yet.';
-  await bot.sendMessage(chatId, `📍 <b>Positions</b>\n\n${text}`, { parse_mode: 'HTML', disable_web_page_preview: true });
+  await bot.sendMessage(chatId, positionsText(), {
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    ...openPositionsKeyboard(),
+  });
 }
 
 export async function sendPosition(chatId, id, query = null) {
@@ -168,14 +197,68 @@ export async function sendPosition(chatId, id, query = null) {
       console.log(`[position] refresh ${id} ${err.message}`);
       return null;
     });
-    if (refreshed) row = { ...row, ...refreshed };
+    if (refreshed) {
+      row = { ...row, ...refreshed };
+      if (refreshed.exitReason) {
+        await sendClosedPositionNarrative(chatId, row, refreshed.exitReason).catch((err) => {
+          console.log(`[position] exit notification ${id} ${err.message}`);
+        });
+      }
+    }
   }
   const buttons = row.status === 'open' ? positionButtons(id) : {};
   if (query) return editMenuMessage(query, formatPosition(row), buttons);
   await bot.sendMessage(chatId, formatPosition(row), { parse_mode: 'HTML', disable_web_page_preview: true, ...buttons });
 }
 
-export async function closePosition(chatId, id, reason) {
+async function sendClosedPositionNarrative(chatId, position, reason = null) {
+  const exitReason = reason || position.exitReason || position.exit_reason || 'closed';
+  const closedPosition = {
+    ...position,
+    status: 'closed',
+    exitReason,
+    exit_reason: exitReason,
+  };
+  return bot.sendMessage(chatId, formatPosition(closedPosition), {
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  });
+}
+
+export async function refreshOpenPositions(chatId, query = null) {
+  const rows = openPositions();
+  let refreshed = 0;
+  let closed = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const result = await refreshPosition(row, { autoExit: row.execution_mode !== 'live' }).catch((err) => {
+      failed++;
+      console.log(`[position] refresh all ${row.id} ${err.message}`);
+      return null;
+    });
+    if (!result) continue;
+    refreshed++;
+    if (result.status === 'closed' || result.exitReason) {
+      closed++;
+      await sendClosedPositionNarrative(chatId, result, result.exitReason || result.exit_reason).catch((err) => {
+        console.log(`[position] exit notification ${row.id} ${err.message}`);
+      });
+    }
+  }
+  const summary = [
+    `🔄 <b>Refreshed open positions</b>`,
+    `Checked: ${rows.length} · Updated: ${refreshed}${closed ? ` · Closed: ${closed}` : ''}${failed ? ` · Failed: ${failed}` : ''}`,
+  ].join('\n');
+  const text = `${summary}\n\n${positionsText()}`;
+  if (query) return editMenuMessage(query, text, openPositionsKeyboard());
+  return bot.sendMessage(chatId, text, {
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    ...openPositionsKeyboard(),
+  });
+}
+
+export async function closePosition(chatId, id, reason, query = null) {
   const row = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(id);
   if (!row || row.status !== 'open') return bot.sendMessage(chatId, 'Open position not found.');
   const result = await refreshPosition(row, { autoExit: false });
@@ -185,18 +268,33 @@ export async function closePosition(chatId, id, reason) {
   const pnlSol = Number(row.size_sol) * pnlPercent / 100;
   let sell = null;
   if (row.execution_mode === 'live') sell = await executeLiveSell(row, reason);
+  const closedAt = now();
   db.prepare(`
     UPDATE dry_run_positions
     SET status = 'closed', closed_at_ms = ?, exit_price = ?, exit_mcap = ?, exit_reason = ?,
         pnl_percent = ?, pnl_sol = ?, exit_signature = ?
     WHERE id = ?
-  `).run(now(), price, mcap, reason, pnlPercent, pnlSol, sell?.signature || null, id);
+  `).run(closedAt, price, mcap, reason, pnlPercent, pnlSol, sell?.signature || null, id);
   db.prepare(`
     INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
     VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, row.mint, now(), price, mcap, row.size_sol, row.token_amount_est, reason, json({ pnlPercent, pnlSol, sell }));
-  const label = row.execution_mode === 'live' ? 'Closed live position' : 'Closed dry-run position';
-  await bot.sendMessage(chatId, `${label} #${id}: ${escapeHtml(reason)} ${fmtPct(pnlPercent)}`, { parse_mode: 'HTML' });
+  `).run(id, row.mint, closedAt, price, mcap, row.size_sol, row.token_amount_est, reason, json({ pnlPercent, pnlSol, sell }));
+  const closedPosition = {
+    ...row,
+    status: 'closed',
+    closed_at_ms: closedAt,
+    high_water_mcap: result?.high_water_mcap ?? row.high_water_mcap,
+    high_water_price: result?.high_water_price ?? row.high_water_price,
+    exit_price: price,
+    exit_mcap: mcap,
+    exit_reason: reason,
+    exitReason: reason,
+    pnl_percent: pnlPercent,
+    pnl_sol: pnlSol,
+    exit_signature: sell?.signature || null,
+  };
+  await sendClosedPositionNarrative(chatId, closedPosition, reason);
+  if (query) return editMenuMessage(query, formatPosition(closedPosition), {});
 }
 
 export async function updatePositionRule(chatId, id, field, nextValue, query = null) {
